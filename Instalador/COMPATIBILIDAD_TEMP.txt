@@ -1,0 +1,11 @@
+INSTALADOR COMPATIBLE DE ASTOLFO DESIGN
+=======================================
+
+Esta variante evita que el instalador se copie y ejecute desde la carpeta
+temporal de Windows.
+
+1. Extrae TODO el contenido del archivo ZIP.
+2. Conserva juntos el archivo EXE y los archivos BIN.
+3. Ejecuta "Instalar_AstolfoDesign.exe".
+
+No ejecutes el EXE directamente desde dentro del ZIP.

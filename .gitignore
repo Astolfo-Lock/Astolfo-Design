@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+dist_*/
+*.manifest
+
+# Instaladores y artefactos compilados
+Instalador/App/
+Instalador/Salida/
+Instalador/Compatibilidad/
+Instalador/*.zip
+Instalador/*.rar
+*.exe
+*.bin
+
+# Restos de compilaciones anteriores
+bin/
+obj/
+
+# IDE y sistema operativo
+.vscode/
+.idea/
+*.user
+*.suo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Archivos temporales de autenticación local
+gh-auth.out
+gh-auth.err
+
+# Diseños locales de prueba
+*.astolfo
+*.astolfo.json

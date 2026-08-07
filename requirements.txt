@@ -1,0 +1,2 @@
+PyQt6==6.10.2
+zint-bindings==1.2.0
