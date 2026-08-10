@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import ctypes
+from dataclasses import dataclass
 
 import zint
 from PyQt6.QtCore import QMarginsF, QRectF, QSizeF, Qt, QTimer, pyqtSignal
@@ -20,6 +21,7 @@ from PyQt6.QtGui import QPageLayout, QPageSize
 from PyQt6.QtPrintSupport import QPrinter, QPrinterInfo
 from PyQt6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
@@ -50,6 +52,57 @@ from PyQt6.QtWidgets import (
 
 APP_NAME = "Astolfo Design"
 FILE_FILTER = "Diseño Astolfo (*.astolfo);;Diseño antiguo (*.astolfo.json);;Archivo JSON (*.json)"
+PRINT_MODE_DRIVER = "driver"
+PRINT_MODE_ASTOLFO = "astolfo"
+
+
+def mm_to_pixels(millimeters, dpi):
+    """Convert physical millimeters to device pixels, rounding only once."""
+    return round(float(millimeters) * float(dpi) / 25.4)
+
+
+def size_in_mm(page_layout):
+    rect = page_layout.fullRect(QPageLayout.Unit.Millimeter)
+    return QSizeF(rect.width(), rect.height())
+
+
+def sizes_match(first, second, tolerance_mm=0.5):
+    return (
+        abs(first.width() - second.width()) <= tolerance_mm
+        and abs(first.height() - second.height()) <= tolerance_mm
+    )
+
+
+def label_size_mm(label):
+    """Read version 2 millimeters or migrate a version 1 centimeter label."""
+    if "width_mm" in label and "height_mm" in label:
+        return float(label["width_mm"]), float(label["height_mm"])
+    return float(label["width_cm"]) * 10, float(label["height_cm"]) * 10
+
+
+@dataclass(frozen=True)
+class PrintDiagnostics:
+    requested_size: QSizeF
+    applied_size: QSizeF
+    printable_rect: QRectF
+    dpi: int
+    orientation: str
+    custom_size_requested: bool
+    custom_size_accepted: bool
+
+    @property
+    def fits_page(self):
+        return (
+            self.requested_size.width() <= self.applied_size.width() + 0.5
+            and self.requested_size.height() <= self.applied_size.height() + 0.5
+        )
+
+    @property
+    def fits_printable_area(self):
+        return (
+            self.requested_size.width() <= self.printable_rect.width() + 0.5
+            and self.requested_size.height() <= self.printable_rect.height() + 0.5
+        )
 
 
 def resource_path(filename):
@@ -117,8 +170,8 @@ class LabelCanvas(QGraphicsView):
 
     def __init__(self):
         super().__init__()
-        self.width_cm = 10.0
-        self.height_cm = 5.0
+        self.width_mm = 100.0
+        self.height_mm = 50.0
         self.design_scene = QGraphicsScene(self)
         self.setScene(self.design_scene)
         self.setBackgroundBrush(QColor("#dfe3e9"))
@@ -134,20 +187,18 @@ class LabelCanvas(QGraphicsView):
         self.label_item.setPen(QPen(QColor("#aeb4bf"), 0.6))
         self.label_item.setZValue(-10)
         self.design_scene.addItem(self.label_item)
-        self.set_dimensions(self.width_cm, self.height_cm)
+        self.set_dimensions_mm(self.width_mm, self.height_mm)
 
-    def set_dimensions(self, width_cm, height_cm):
-        old_width = max(self.width_cm * 10, 1)
-        old_height = max(self.height_cm * 10, 1)
+    def set_dimensions_mm(self, width_mm, height_mm):
+        old_width = max(self.width_mm, 1)
+        old_height = max(self.height_mm, 1)
         positions = [
             (item, item.pos().x() / old_width, item.pos().y() / old_height)
             for item in self.design_items()
         ]
 
-        self.width_cm = width_cm
-        self.height_cm = height_cm
-        width_mm = width_cm * 10
-        height_mm = height_cm * 10
+        self.width_mm = float(width_mm)
+        self.height_mm = float(height_mm)
         self.label_item.setRect(0, 0, width_mm, height_mm)
         self.design_scene.setSceneRect(-12, -12, width_mm + 24, height_mm + 24)
 
@@ -211,8 +262,8 @@ class LabelCanvas(QGraphicsView):
         self.set_item_scale(item, scale)
         self.design_scene.addItem(item)
         item.setPos(
-            x_ratio * self.width_cm * 10,
-            y_ratio * self.height_cm * 10,
+            x_ratio * self.width_mm,
+            y_ratio * self.height_mm,
         )
         return item
 
@@ -220,8 +271,8 @@ class LabelCanvas(QGraphicsView):
         pixmap = QPixmap(path)
         if pixmap.isNull():
             raise ValueError("La imagen seleccionada no se puede leer.")
-        max_width = self.width_cm * 10 * 0.35
-        max_height = self.height_cm * 10 * 0.35
+        max_width = self.width_mm * 0.35
+        max_height = self.height_mm * 0.35
         base_scale = min(max_width / pixmap.width(), max_height / pixmap.height(), 1.0)
         item = QGraphicsPixmapItem(pixmap)
         item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
@@ -231,8 +282,8 @@ class LabelCanvas(QGraphicsView):
         self.set_item_scale(item, scale, base_scale)
         self.design_scene.addItem(item)
         item.setPos(
-            x_ratio * self.width_cm * 10,
-            y_ratio * self.height_cm * 10,
+            x_ratio * self.width_mm,
+            y_ratio * self.height_mm,
         )
         return item
 
@@ -241,18 +292,18 @@ class LabelCanvas(QGraphicsView):
             raise ValueError("El contenido del código de barras no puede estar vacío.")
         item = ZintBarcodeItem(value.strip())
         bounds = item.boundingRect()
-        target_width = self.width_cm * 10 * 0.78
+        target_width = self.width_mm * 0.78
         fit_scale = target_width / max(bounds.width(), 1)
         base_scale = max(0.14, min(0.22, fit_scale))
         item.setData(0, "barcode")
         item.setData(1, value.strip())
-        item.setData(4, bounds.width() * base_scale > self.width_cm * 10 * 0.9)
+        item.setData(4, bounds.width() * base_scale > self.width_mm * 0.9)
         self.make_movable(item)
         self.set_item_scale(item, scale, base_scale)
         self.design_scene.addItem(item)
         item.setPos(
-            x_ratio * self.width_cm * 10,
-            y_ratio * self.height_cm * 10,
+            x_ratio * self.width_mm,
+            y_ratio * self.height_mm,
         )
         return item
 
@@ -261,8 +312,8 @@ class LabelCanvas(QGraphicsView):
             self.design_scene.removeItem(item)
 
     def export_elements(self):
-        width_mm = self.width_cm * 10
-        height_mm = self.height_cm * 10
+        width_mm = self.width_mm
+        height_mm = self.height_mm
         elements = []
         for item in reversed(self.design_items()):
             element = {
@@ -286,8 +337,8 @@ class LabelCanvas(QGraphicsView):
     def element_data(self, item):
         element = {
             "type": item.data(0),
-            "x": item.pos().x() / (self.width_cm * 10),
-            "y": item.pos().y() / (self.height_cm * 10),
+            "x": item.pos().x() / self.width_mm,
+            "y": item.pos().y() / self.height_mm,
             "scale": self.logical_scale(item),
         }
         if item.data(0) == "text":
@@ -416,8 +467,8 @@ class LabelCanvas(QGraphicsView):
         if not accepted or not value or value == current_value:
             return item
 
-        x_ratio = item.pos().x() / max(self.width_cm * 10, 1)
-        y_ratio = item.pos().y() / max(self.height_cm * 10, 1)
+        x_ratio = item.pos().x() / max(self.width_mm, 1)
+        y_ratio = item.pos().y() / max(self.height_mm, 1)
         logical_scale = self.logical_scale(item)
         z_value = item.zValue()
         try:
@@ -495,6 +546,19 @@ class MainWindow(QMainWindow):
         self.printer_list = QListWidget()
         self.printer_list.setObjectName("printerList")
         self.printer_list.setMaximumHeight(128)
+        self.paper_mode = QComboBox()
+        self.paper_mode.setObjectName("printOption")
+        self.paper_mode.addItem("Usar tamaño configurado en la impresora", PRINT_MODE_DRIVER)
+        self.paper_mode.addItem("Solicitar tamaño desde Astolfo", PRINT_MODE_ASTOLFO)
+        self.paper_mode.setToolTip(
+            "El primer modo respeta el papel del controlador. El segundo solicita "
+            "el ancho y largo definidos en el diseño."
+        )
+        self.dpi_input = QComboBox()
+        self.dpi_input.setObjectName("printOption")
+        self.dpi_input.addItem("DPI automático (controlador)", None)
+        for dpi in (203, 300, 600):
+            self.dpi_input.addItem(f"{dpi} DPI", dpi)
 
         self.setMenuWidget(self.build_toolbar())
         self.setCentralWidget(self.build_workspace())
@@ -648,6 +712,8 @@ class MainWindow(QMainWindow):
         printer_heading.addWidget(refresh)
         layout.addLayout(printer_heading)
         layout.addWidget(self.printer_list)
+        layout.addWidget(self.paper_mode)
+        layout.addWidget(self.dpi_input)
         layout.addStretch()
 
         scroll = QScrollArea()
@@ -754,7 +820,7 @@ class MainWindow(QMainWindow):
     def apply_dimensions(self):
         width = self.width_input.value()
         height = self.height_input.value()
-        self.canvas.set_dimensions(width, height)
+        self.canvas.set_dimensions_mm(width * 10, height * 10)
         self.dimension_display.setText(f"{width:g} × {height:g} cm")
         self.statusBar().showMessage(
             f"Etiqueta actualizada: {width:g} × {height:g} cm", 3000
@@ -979,10 +1045,10 @@ class MainWindow(QMainWindow):
     def document_data(self):
         return {
             "application": APP_NAME,
-            "version": 1,
+            "version": 2,
             "label": {
-                "width_cm": self.width_input.value(),
-                "height_cm": self.height_input.value(),
+                "width_mm": self.canvas.width_mm,
+                "height_mm": self.canvas.height_mm,
             },
             "elements": self.canvas.export_elements(),
         }
@@ -1083,13 +1149,15 @@ class MainWindow(QMainWindow):
         printer_info = self.selected_printer()
         if printer_info is None:
             return
+        printer, diagnostics = self.prepare_printer(printer_info)
         if QMessageBox.question(
             self,
             "Confirmar impresión",
-            f"¿Imprimir una etiqueta en “{printer_info.printerName()}”?",
+            self.print_confirmation(printer_info, diagnostics, 1)
+            + "¿Enviar este trabajo de impresión?",
         ) != QMessageBox.StandardButton.Yes:
             return
-        self.print_pages(printer_info, 1)
+        self.print_pages(printer, printer_info, diagnostics, 1)
 
     def print_incremental(self):
         selected = self.canvas.design_scene.selectedItems()
@@ -1125,13 +1193,13 @@ class MainWindow(QMainWindow):
         printer_info = self.selected_printer()
         if printer_info is None:
             return
+        printer, diagnostics = self.prepare_printer(printer_info)
         start = int(original_text)
         last = start + quantity - 1
         width = len(original_text)
         last_text = str(last).zfill(width)
-        confirmation = (
-            f"Impresora: {printer_info.printerName()}\n"
-            f"Cantidad: {quantity} etiquetas\n"
+        confirmation = self.print_confirmation(printer_info, diagnostics, quantity) + (
+            "\n"
             f"Primera: {original_text}\n"
             f"Última: {last_text}\n\n"
             "¿Enviar este trabajo de impresión?"
@@ -1142,7 +1210,9 @@ class MainWindow(QMainWindow):
             return
         try:
             self.print_pages(
+                printer,
                 printer_info,
+                diagnostics,
                 quantity,
                 text_item=text_item,
                 start=start,
@@ -1152,31 +1222,103 @@ class MainWindow(QMainWindow):
             text_item.setPlainText(original_text)
             self.canvas.viewport().update()
 
+    def prepare_printer(self, printer_info):
+        printer = QPrinter(printer_info, QPrinter.PrinterMode.HighResolution)
+        selected_dpi = self.dpi_input.currentData()
+        if selected_dpi:
+            printer.setResolution(int(selected_dpi))
+
+        requested_size = QSizeF(self.canvas.width_mm, self.canvas.height_mm)
+        custom_size_requested = self.paper_mode.currentData() == PRINT_MODE_ASTOLFO
+        layout_accepted = True
+        if custom_size_requested:
+            # QPageLayout swaps dimensions in landscape mode. Use a portrait custom
+            # page so its physical width and height remain exactly as requested.
+            page_size = QPageSize(
+                requested_size,
+                QPageSize.Unit.Millimeter,
+                f"Astolfo {requested_size.width():g}x{requested_size.height():g} mm",
+                QPageSize.SizeMatchPolicy.ExactMatch,
+            )
+            layout_accepted = printer.setPageLayout(
+                QPageLayout(
+                    page_size,
+                    QPageLayout.Orientation.Portrait,
+                    QMarginsF(0, 0, 0, 0),
+                    QPageLayout.Unit.Millimeter,
+                )
+            )
+
+        printer.setFullPage(True)
+        applied_layout = printer.pageLayout()
+        applied_size = size_in_mm(applied_layout)
+        printable_rect = applied_layout.paintRect(QPageLayout.Unit.Millimeter)
+        orientation = (
+            "Horizontal"
+            if applied_size.width() > applied_size.height()
+            else "Vertical"
+        )
+        diagnostics = PrintDiagnostics(
+            requested_size=requested_size,
+            applied_size=applied_size,
+            printable_rect=printable_rect,
+            dpi=printer.resolution(),
+            orientation=orientation,
+            custom_size_requested=custom_size_requested,
+            custom_size_accepted=(
+                layout_accepted and sizes_match(requested_size, applied_size)
+            ),
+        )
+        return printer, diagnostics
+
+    @staticmethod
+    def print_confirmation(printer_info, diagnostics, quantity):
+        requested = diagnostics.requested_size
+        applied = diagnostics.applied_size
+        printable = diagnostics.printable_rect
+        mode = (
+            "Solicitado por Astolfo"
+            if diagnostics.custom_size_requested
+            else "Configurado en el controlador"
+        )
+        acceptance = (
+            "Aceptado"
+            if diagnostics.custom_size_accepted
+            else "El controlador usa otro tamaño"
+        )
+        if not diagnostics.custom_size_requested:
+            acceptance = "Sin modificación"
+        fit_warning = ""
+        if not diagnostics.fits_page:
+            fit_warning = "\nADVERTENCIA: el diseño no cabe completo en el papel aplicado.\n"
+        elif not diagnostics.fits_printable_area:
+            fit_warning = (
+                "\nADVERTENCIA: parte del diseño queda fuera del área imprimible "
+                "reportada por el controlador.\n"
+            )
+        return (
+            f"Impresora: {printer_info.printerName()}\n"
+            f"Cantidad: {quantity} etiqueta(s)\n"
+            f"Modo: {mode} ({acceptance})\n"
+            f"Tamaño solicitado: {requested.width():g} × {requested.height():g} mm\n"
+            f"Tamaño aplicado: {applied.width():g} × {applied.height():g} mm\n"
+            f"Área imprimible: {printable.width():g} × {printable.height():g} mm\n"
+            f"DPI: {diagnostics.dpi}\n"
+            f"Orientación: {diagnostics.orientation}\n"
+            "Escalado: 100 % (tamaño físico)\n"
+            f"{fit_warning}\n"
+        )
+
     def print_pages(
         self,
+        printer,
         printer_info,
+        diagnostics,
         quantity,
         text_item=None,
         start=0,
         number_width=1,
     ):
-        printer = QPrinter(printer_info, QPrinter.PrinterMode.HighResolution)
-        printer.setFullPage(True)
-        page_size = QPageSize(
-            QSizeF(self.canvas.width_cm * 10, self.canvas.height_cm * 10),
-            QPageSize.Unit.Millimeter,
-            "Etiqueta Astolfo",
-            QPageSize.SizeMatchPolicy.ExactMatch,
-        )
-        layout_accepted = printer.setPageLayout(
-            QPageLayout(
-                page_size,
-                QPageLayout.Orientation.Portrait,
-                QMarginsF(0, 0, 0, 0),
-                QPageLayout.Unit.Millimeter,
-            )
-        )
-
         painter = QPainter()
         if not painter.begin(printer):
             QMessageBox.critical(
@@ -1186,15 +1328,16 @@ class MainWindow(QMainWindow):
             )
             return
         source = self.canvas.label_item.rect()
-        width_mm = self.canvas.width_cm * 10
-        height_mm = self.canvas.height_cm * 10
-        dpi = printer.resolution()
+        width_mm = self.canvas.width_mm
+        height_mm = self.canvas.height_mm
+        dpi = diagnostics.dpi
         target = QRectF(
             0,
             0,
-            width_mm * dpi / 25.4,
-            height_mm * dpi / 25.4,
+            mm_to_pixels(width_mm, dpi),
+            mm_to_pixels(height_mm, dpi),
         )
+        completed = False
         try:
             for index in range(quantity):
                 if index and not printer.newPage():
@@ -1207,14 +1350,17 @@ class MainWindow(QMainWindow):
                     source,
                     Qt.AspectRatioMode.KeepAspectRatio,
                 )
+            completed = True
         except RuntimeError as error:
             QMessageBox.critical(self, "Impresión interrumpida", str(error))
         finally:
             painter.end()
+        if not completed:
+            return
         self.statusBar().showMessage(
             f"Se enviaron {quantity} etiqueta(s) a {printer_info.printerName()}", 6000
         )
-        if not layout_accepted:
+        if diagnostics.custom_size_requested and not diagnostics.custom_size_accepted:
             QMessageBox.information(
                 self,
                 "Tamaño controlado por la impresora",
@@ -1235,8 +1381,9 @@ class MainWindow(QMainWindow):
             with open(path, "r", encoding="utf-8") as file:
                 data = json.load(file)
             label = data["label"]
-            self.width_input.setValue(float(label["width_cm"]))
-            self.height_input.setValue(float(label["height_cm"]))
+            width_mm, height_mm = label_size_mm(label)
+            self.width_input.setValue(width_mm / 10)
+            self.height_input.setValue(height_mm / 10)
             self.canvas.clear_design()
             self.apply_dimensions()
             warnings = []
@@ -1502,7 +1649,7 @@ QSlider:disabled {
 #separator {
     color: #e3e5e9;
 }
-QDoubleSpinBox {
+QDoubleSpinBox, #printOption {
     background: #fbfbfc;
     color: #171b24;
     border: 1px solid #d9dce2;
@@ -1513,6 +1660,14 @@ QDoubleSpinBox {
 }
 QDoubleSpinBox:focus {
     border-color: #6d5dfc;
+}
+#printOption {
+    min-height: 22px;
+    font-size: 11px;
+}
+#printOption::drop-down {
+    border: none;
+    width: 22px;
 }
 #canvasPanel {
     background: #dfe3e9;
@@ -1582,7 +1737,7 @@ QScrollBar::handle:vertical:hover {
 #separator {
     color: #343b47;
 }
-QDoubleSpinBox {
+QDoubleSpinBox, #printOption {
     background: #151a22;
     color: #f1f3f7;
     border-color: #3a424f;
