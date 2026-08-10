@@ -14,6 +14,11 @@ Windows.
 - Tema claro y oscuro.
 - Detección de impresoras instaladas.
 - Impresión individual e incremental.
+- Impresión genérica mediante el controlador instalado en Windows.
+- Selección entre el tamaño de papel configurado en el controlador y un tamaño
+  personalizado solicitado por Astolfo.
+- Diagnóstico previo de tamaño solicitado y aplicado, DPI, orientación, área
+  imprimible y escalado.
 - Pegado automático de campos `Nombre:` y `PosCode:` desde el portapapeles.
 - Asociación de archivos `.astolfo` mediante el instalador.
 
@@ -38,9 +43,23 @@ También puedes utilizar `iniciar_astolfo_design.bat`.
 
 ## Formato `.astolfo`
 
-Los diseños se guardan como JSON legible con la extensión `.astolfo`. Contienen
-las dimensiones de la etiqueta y las propiedades de cada elemento. Las imágenes
-se referencian mediante su ruta local.
+Los diseños se guardan como JSON legible con la extensión `.astolfo`. Las
+dimensiones se almacenan internamente en milímetros y la interfaz las muestra en
+centímetros. El cargador mantiene compatibilidad con los documentos antiguos que
+guardaban `width_cm` y `height_cm`. Las imágenes se referencian mediante su ruta
+local.
+
+## Impresión
+
+Astolfo imprime mediante `QPrinter` y el controlador de Windows, sin depender de
+Zebra, ZPL ni una marca concreta. Antes de enviar un trabajo muestra las medidas
+solicitadas, las aceptadas por el controlador, el DPI, la orientación, el área
+imprimible y el escalado aplicado.
+
+El modo **Usar tamaño configurado en la impresora** es el predeterminado y suele
+ser el más compatible. El modo **Solicitar tamaño desde Astolfo** intenta aplicar
+las dimensiones del diseño y avisa si el controlador conserva otro tamaño. El
+DPI puede dejarse a cargo del controlador o elegirse manualmente.
 
 ## Crear el ejecutable
 
