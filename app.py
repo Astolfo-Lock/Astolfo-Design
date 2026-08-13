@@ -6,10 +6,11 @@ import ctypes
 from dataclasses import dataclass
 
 import zint
-from PyQt6.QtCore import QMarginsF, QRectF, QSizeF, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QMarginsF, QRectF, QSettings, QSize, QSizeF, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
     QColor,
+    QDesktopServices,
     QFont,
     QIcon,
     QKeySequence,
@@ -22,9 +23,11 @@ from PyQt6.QtPrintSupport import QPrinter, QPrinterInfo
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
+    QFormLayout,
     QGraphicsDropShadowEffect,
     QGraphicsItem,
     QGraphicsPixmapItem,
@@ -51,9 +54,49 @@ from PyQt6.QtWidgets import (
 
 
 APP_NAME = "Astolfo Design"
+APP_VERSION = "1.3.0"
+PROJECT_URL = "https://github.com/Astolfo-Lock/Astolfo-Design"
 FILE_FILTER = "Diseño Astolfo (*.astolfo);;Diseño antiguo (*.astolfo.json);;Archivo JSON (*.json)"
 PRINT_MODE_DRIVER = "driver"
 PRINT_MODE_ASTOLFO = "astolfo"
+
+RELEASE_NOTES = (
+    (
+        "1.3.0",
+        "Funciones nuevas",
+        (
+            "Cantidad configurable en la impresión normal.",
+            "Impresión limpia sin marcos ni selecciones del editor.",
+            "Menú Ajustes con impresión avanzada y preferencias persistentes.",
+            "Confirmación de impresión simplificada o técnica.",
+            "Ventana de versión y notas accesible desde el logo.",
+            "Acceso manual a GitHub para descargar actualizaciones.",
+        ),
+    ),
+    (
+        "1.2.0",
+        "Funciones nuevas",
+        (
+            "Dos modos de tamaño de impresión.",
+            "Selección de DPI.",
+            "Diagnóstico previo de impresión.",
+            "Formato .astolfo versión 2 en milímetros.",
+            "Compatibilidad con documentos antiguos.",
+        ),
+    ),
+    (
+        "1.1.0",
+        "Funciones principales",
+        (
+            "Diseño de etiquetas en centímetros.",
+            "Textos, imágenes y códigos de barras Code 128.",
+            "Impresión individual e incremental.",
+            "Pegado automático de Nombre y PosCode.",
+            "Edición de textos y códigos de barras.",
+            "Tema claro y oscuro.",
+        ),
+    ),
+)
 
 
 def mm_to_pixels(millimeters, dpi):
@@ -113,6 +156,24 @@ def resource_path(filename):
 class DimensionSpinBox(QDoubleSpinBox):
     def wheelEvent(self, event):
         event.ignore()
+
+
+class NoWheelComboBox(QComboBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class ClickableLabel(QLabel):
+    clicked = pyqtSignal()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(
+            event.position().toPoint()
+        ):
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class ZintBarcodeItem(QGraphicsItem):
@@ -521,6 +582,19 @@ class MainWindow(QMainWindow):
         self.dark_mode = False
         self.auto_paste_enabled = False
         self.last_auto_clipboard = None
+        self.app_settings = QSettings(
+            QSettings.Format.IniFormat,
+            QSettings.Scope.UserScope,
+            APP_NAME,
+            APP_NAME,
+        )
+        self.paper_mode_value = self.app_settings.value(
+            "print/paper_mode", PRINT_MODE_DRIVER, type=str
+        )
+        if self.paper_mode_value not in (PRINT_MODE_DRIVER, PRINT_MODE_ASTOLFO):
+            self.paper_mode_value = PRINT_MODE_DRIVER
+        saved_dpi = self.app_settings.value("print/dpi", "auto", type=str)
+        self.dpi_value = int(saved_dpi) if saved_dpi in ("203", "300", "600") else None
         self.setWindowTitle(f"{APP_NAME} — Sin título")
         self.setWindowIcon(QIcon(resource_path("Logo.ico")))
         self.resize(1180, 760)
@@ -546,20 +620,6 @@ class MainWindow(QMainWindow):
         self.printer_list = QListWidget()
         self.printer_list.setObjectName("printerList")
         self.printer_list.setMaximumHeight(128)
-        self.paper_mode = QComboBox()
-        self.paper_mode.setObjectName("printOption")
-        self.paper_mode.addItem("Usar tamaño configurado en la impresora", PRINT_MODE_DRIVER)
-        self.paper_mode.addItem("Solicitar tamaño desde Astolfo", PRINT_MODE_ASTOLFO)
-        self.paper_mode.setToolTip(
-            "El primer modo respeta el papel del controlador. El segundo solicita "
-            "el ancho y largo definidos en el diseño."
-        )
-        self.dpi_input = QComboBox()
-        self.dpi_input.setObjectName("printOption")
-        self.dpi_input.addItem("DPI automático (controlador)", None)
-        for dpi in (203, 300, 600):
-            self.dpi_input.addItem(f"{dpi} DPI", dpi)
-
         self.setMenuWidget(self.build_toolbar())
         self.setCentralWidget(self.build_workspace())
         self.setStatusBar(QStatusBar())
@@ -579,9 +639,12 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(18, 6, 12, 6)
         layout.setSpacing(4)
 
-        logo = QLabel()
+        logo = ClickableLabel()
         logo.setObjectName("appLogo")
         logo.setFixedSize(36, 36)
+        logo.setCursor(Qt.CursorShape.PointingHandCursor)
+        logo.setToolTip(f"Acerca de {APP_NAME} {APP_VERSION}")
+        logo.clicked.connect(self.show_about)
         logo.setPixmap(
             QPixmap(resource_path("Logo.png")).scaled(
                 32,
@@ -636,6 +699,35 @@ class MainWindow(QMainWindow):
         file_button.setCursor(Qt.CursorShape.PointingHandCursor)
         file_button.setMenu(file_menu)
         layout.addWidget(file_button)
+
+        self.clean_print_action = QAction("Impresión limpia (sin marco ni selección)", self)
+        self.clean_print_action.setCheckable(True)
+        self.clean_print_action.setChecked(
+            self.app_settings.value("print/clean", True, type=bool)
+        )
+        self.clean_print_action.toggled.connect(
+            lambda checked: self.app_settings.setValue("print/clean", checked)
+        )
+        self.print_details_action = QAction("Mostrar datos técnicos al confirmar", self)
+        self.print_details_action.setCheckable(True)
+        self.print_details_action.setChecked(
+            self.app_settings.value("print/show_details", False, type=bool)
+        )
+        self.print_details_action.toggled.connect(
+            lambda checked: self.app_settings.setValue("print/show_details", checked)
+        )
+        settings_menu = QMenu(self)
+        settings_menu.addAction(self.clean_print_action)
+        settings_menu.addAction(self.print_details_action)
+        settings_menu.addSeparator()
+        advanced_print_action = QAction("Impresión avanzada…", self)
+        advanced_print_action.triggered.connect(self.show_advanced_print_settings)
+        settings_menu.addAction(advanced_print_action)
+        settings_button = QPushButton("Ajustes")
+        settings_button.setObjectName("toolbarButton")
+        settings_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        settings_button.setMenu(settings_menu)
+        layout.addWidget(settings_button)
         layout.addSpacing(12)
         layout.addWidget(self.toolbar_button("Imprimir", self.print_current))
         layout.addWidget(
@@ -643,6 +735,118 @@ class MainWindow(QMainWindow):
         )
         layout.addStretch()
         return toolbar
+
+    def show_about(self):
+        notes_html = []
+        for version, heading, changes in RELEASE_NOTES:
+            items = "".join(f"<li>{change}</li>" for change in changes)
+            notes_html.append(
+                f"<h3>Versión {version}</h3>"
+                f"<p><b>{heading}</b></p>"
+                f"<ul>{items}</ul>"
+            )
+
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle(f"Acerca de {APP_NAME}")
+        dialog.setWindowIcon(QIcon(resource_path("Logo.ico")))
+        dialog.setIconPixmap(
+            QPixmap(resource_path("Logo.png")).scaled(
+                64,
+                64,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        dialog.setTextFormat(Qt.TextFormat.RichText)
+        dialog.setText(
+            f"<h2>{APP_NAME}</h2>"
+            f"<p>Versión instalada: <b>{APP_VERSION}</b></p>"
+            "<hr>"
+            + "".join(notes_html)
+        )
+        github_button = dialog.addButton(
+            "GitHub · Descargar actualizaciones",
+            QMessageBox.ButtonRole.ActionRole,
+        )
+        github_button.setObjectName("githubButton")
+        github_icon = "github-mark-light.svg" if self.dark_mode else "github-mark.svg"
+        github_button.setIcon(QIcon(resource_path(github_icon)))
+        github_button.setIconSize(QSize(18, 18))
+        github_button.setToolTip(
+            "Abrir manualmente la página oficial de Astolfo Design en GitHub"
+        )
+        dialog.addButton(QMessageBox.StandardButton.Ok)
+        dialog.exec()
+        if dialog.clickedButton() is github_button:
+            if not QDesktopServices.openUrl(QUrl(PROJECT_URL)):
+                QMessageBox.warning(
+                    self,
+                    "No se pudo abrir GitHub",
+                    f"Abre esta dirección manualmente:\n{PROJECT_URL}",
+                )
+
+    def show_advanced_print_settings(self):
+        dialog = QDialog(self)
+        dialog.setObjectName("advancedPrintDialog")
+        dialog.setWindowTitle("Impresión avanzada")
+        dialog.setWindowIcon(QIcon(resource_path("Logo.ico")))
+        dialog.setModal(True)
+        dialog.setMinimumWidth(430)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(14)
+
+        title = QLabel("IMPRESIÓN AVANZADA")
+        title.setObjectName("dialogTitle")
+        layout.addWidget(title)
+        description = QLabel(
+            "Estas opciones se aplican a las próximas impresiones y se guardan "
+            "automáticamente al cerrar esta ventana."
+        )
+        description.setObjectName("hint")
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        form = QFormLayout()
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(12)
+        paper_mode = NoWheelComboBox()
+        paper_mode.setObjectName("printOption")
+        paper_mode.addItem(
+            "Usar tamaño configurado en la impresora", PRINT_MODE_DRIVER
+        )
+        paper_mode.addItem("Solicitar tamaño desde Astolfo", PRINT_MODE_ASTOLFO)
+        paper_mode.setCurrentIndex(max(0, paper_mode.findData(self.paper_mode_value)))
+        paper_mode.setToolTip(
+            "El primer modo respeta el papel del controlador. El segundo solicita "
+            "el ancho y largo definidos en el diseño."
+        )
+        dpi_input = NoWheelComboBox()
+        dpi_input.setObjectName("printOption")
+        dpi_input.addItem("DPI automático (controlador)", None)
+        for dpi in (203, 300, 600):
+            dpi_input.addItem(f"{dpi} DPI", dpi)
+        dpi_index = dpi_input.findData(self.dpi_value)
+        dpi_input.setCurrentIndex(max(0, dpi_index))
+        form.addRow("Tamaño del papel", paper_mode)
+        form.addRow("Resolución", dpi_input)
+        layout.addLayout(form)
+
+        close_button = QPushButton("Guardar y cerrar")
+        close_button.setObjectName("accentButton")
+        close_button.clicked.connect(dialog.accept)
+        layout.addWidget(close_button)
+
+        dialog.exec()
+        self.paper_mode_value = paper_mode.currentData()
+        self.dpi_value = dpi_input.currentData()
+        self.app_settings.setValue("print/paper_mode", self.paper_mode_value)
+        self.app_settings.setValue(
+            "print/dpi", "auto" if self.dpi_value is None else str(self.dpi_value)
+        )
+        self.app_settings.sync()
+        self.statusBar().showMessage("Ajustes de impresión guardados", 2500)
 
     def build_workspace(self):
         workspace = QWidget()
@@ -712,8 +916,6 @@ class MainWindow(QMainWindow):
         printer_heading.addWidget(refresh)
         layout.addLayout(printer_heading)
         layout.addWidget(self.printer_list)
-        layout.addWidget(self.paper_mode)
-        layout.addWidget(self.dpi_input)
         layout.addStretch()
 
         scroll = QScrollArea()
@@ -1146,6 +1348,17 @@ class MainWindow(QMainWindow):
         return printer
 
     def print_current(self):
+        quantity, accepted = QInputDialog.getInt(
+            self,
+            "Imprimir etiquetas",
+            "Cantidad de etiquetas:",
+            1,
+            1,
+            100000,
+            1,
+        )
+        if not accepted:
+            return
         printer_info = self.selected_printer()
         if printer_info is None:
             return
@@ -1153,11 +1366,11 @@ class MainWindow(QMainWindow):
         if QMessageBox.question(
             self,
             "Confirmar impresión",
-            self.print_confirmation(printer_info, diagnostics, 1)
+            self.print_confirmation(printer_info, diagnostics, quantity)
             + "¿Enviar este trabajo de impresión?",
         ) != QMessageBox.StandardButton.Yes:
             return
-        self.print_pages(printer, printer_info, diagnostics, 1)
+        self.print_pages(printer, printer_info, diagnostics, quantity)
 
     def print_incremental(self):
         selected = self.canvas.design_scene.selectedItems()
@@ -1224,12 +1437,12 @@ class MainWindow(QMainWindow):
 
     def prepare_printer(self, printer_info):
         printer = QPrinter(printer_info, QPrinter.PrinterMode.HighResolution)
-        selected_dpi = self.dpi_input.currentData()
+        selected_dpi = self.dpi_value
         if selected_dpi:
             printer.setResolution(int(selected_dpi))
 
         requested_size = QSizeF(self.canvas.width_mm, self.canvas.height_mm)
-        custom_size_requested = self.paper_mode.currentData() == PRINT_MODE_ASTOLFO
+        custom_size_requested = self.paper_mode_value == PRINT_MODE_ASTOLFO
         layout_accepted = True
         if custom_size_requested:
             # QPageLayout swaps dimensions in landscape mode. Use a portrait custom
@@ -1271,8 +1484,7 @@ class MainWindow(QMainWindow):
         )
         return printer, diagnostics
 
-    @staticmethod
-    def print_confirmation(printer_info, diagnostics, quantity):
+    def print_confirmation(self, printer_info, diagnostics, quantity):
         requested = diagnostics.requested_size
         applied = diagnostics.applied_size
         printable = diagnostics.printable_rect
@@ -1296,9 +1508,13 @@ class MainWindow(QMainWindow):
                 "\nADVERTENCIA: parte del diseño queda fuera del área imprimible "
                 "reportada por el controlador.\n"
             )
-        return (
+        summary = (
             f"Impresora: {printer_info.printerName()}\n"
             f"Cantidad: {quantity} etiqueta(s)\n"
+        )
+        if not self.print_details_action.isChecked():
+            return summary + f"{fit_warning}\n"
+        return summary + (
             f"Modo: {mode} ({acceptance})\n"
             f"Tamaño solicitado: {requested.width():g} × {requested.height():g} mm\n"
             f"Tamaño aplicado: {applied.width():g} × {applied.height():g} mm\n"
@@ -1338,6 +1554,12 @@ class MainWindow(QMainWindow):
             mm_to_pixels(height_mm, dpi),
         )
         completed = False
+        selected_items = self.canvas.design_scene.selectedItems()
+        label_was_visible = self.canvas.label_item.isVisible()
+        clean_print = self.clean_print_action.isChecked()
+        if clean_print:
+            self.canvas.design_scene.clearSelection()
+            self.canvas.label_item.setVisible(False)
         try:
             for index in range(quantity):
                 if index and not printer.newPage():
@@ -1355,6 +1577,12 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Impresión interrumpida", str(error))
         finally:
             painter.end()
+            if clean_print:
+                self.canvas.label_item.setVisible(label_was_visible)
+                for item in selected_items:
+                    if item.scene() is self.canvas.design_scene:
+                        item.setSelected(True)
+                self.canvas.viewport().update()
         if not completed:
             return
         self.statusBar().showMessage(
@@ -1669,6 +1897,18 @@ QDoubleSpinBox:focus {
     border: none;
     width: 22px;
 }
+QComboBox QAbstractItemView {
+    color: #252b36;
+    background: #ffffff;
+    border: 1px solid #cfd3da;
+    outline: none;
+    selection-color: #3026a8;
+    selection-background-color: #eeecff;
+}
+QComboBox QAbstractItemView::item {
+    min-height: 28px;
+    padding: 3px 8px;
+}
 #canvasPanel {
     background: #dfe3e9;
     border-radius: 7px;
@@ -1687,6 +1927,53 @@ QDoubleSpinBox:focus {
 QStatusBar {
     background: white;
     color: #626a78;
+}
+QInputDialog, QMessageBox {
+    background: #ffffff;
+    color: #252b36;
+}
+QInputDialog QLabel, QMessageBox QLabel {
+    color: #252b36;
+    background: transparent;
+}
+QInputDialog QPushButton, QMessageBox QPushButton {
+    min-width: 72px;
+    padding: 6px 12px;
+    color: #252b36;
+    background: #f4f5f7;
+    border: 1px solid #cfd3da;
+    border-radius: 4px;
+}
+QInputDialog QPushButton:hover, QMessageBox QPushButton:hover {
+    color: white;
+    background: #6d5dfc;
+    border-color: #6d5dfc;
+}
+#githubButton {
+    color: #181717;
+    background: #ffffff;
+    border: 1px solid #cfd3da;
+    font-weight: 600;
+}
+#githubButton:hover {
+    color: #181717;
+    background: #f0efff;
+    border-color: #8c82ff;
+}
+#advancedPrintDialog {
+    background: #ffffff;
+    color: #252b36;
+}
+#advancedPrintDialog QLabel {
+    color: #252b36;
+    background: transparent;
+}
+#advancedPrintDialog #hint {
+    color: #717784;
+}
+#dialogTitle {
+    color: #171b24;
+    font: 600 16px "Segoe UI";
 }
 """
 
@@ -1742,6 +2029,13 @@ QDoubleSpinBox, #printOption {
     color: #f1f3f7;
     border-color: #3a424f;
 }
+QComboBox QAbstractItemView {
+    color: #edf0f5;
+    background: #151a22;
+    border-color: #4a5466;
+    selection-color: #ffffff;
+    selection-background-color: #443a8a;
+}
 #canvasPanel {
     background: #171b24;
 }
@@ -1790,6 +2084,37 @@ QMenu::separator {
 }
 QInputDialog QLabel, QMessageBox QLabel {
     color: #edf0f5;
+    background: transparent;
+}
+QInputDialog QPushButton, QMessageBox QPushButton {
+    color: #edf0f5;
+    background: #222833;
+    border-color: #4a5466;
+}
+QInputDialog QPushButton:hover, QMessageBox QPushButton:hover {
+    color: white;
+    background: #6d5dfc;
+    border-color: #6d5dfc;
+}
+#githubButton {
+    color: #181717;
+    background: #ffffff;
+    border-color: #697386;
+}
+#githubButton:hover {
+    color: #181717;
+    background: #eeecff;
+    border-color: #8c82ff;
+}
+#advancedPrintDialog {
+    background: #1b202a;
+    color: #edf0f5;
+}
+#advancedPrintDialog QLabel, #advancedPrintDialog #dialogTitle {
+    color: #edf0f5;
+}
+#advancedPrintDialog #hint {
+    color: #a7adba;
 }
 QInputDialog QLineEdit {
     background: #151a22;

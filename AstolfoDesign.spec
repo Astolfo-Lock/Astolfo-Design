@@ -4,7 +4,12 @@ a = Analysis(
     ["app.py"],
     pathex=[],
     binaries=[],
-    datas=[("Logo.ico", "."), ("Logo.png", ".")],
+    datas=[
+        ("Logo.ico", "."),
+        ("Logo.png", "."),
+        ("github-mark.svg", "."),
+        ("github-mark-light.svg", "."),
+    ],
     hiddenimports=["zint", "pydoc"],
     hookspath=[],
     hooksconfig={},
