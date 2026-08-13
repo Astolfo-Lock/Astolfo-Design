@@ -10,6 +10,8 @@ Aplicación de escritorio para diseñar e imprimir etiquetas
 - Edición de textos y códigos de barras existentes.
 - Guardado de diseños en archivos `.astolfo`.
 - Tema claro y oscuro.
+- Número de versión y notas de cambios accesibles al hacer clic en el logo.
+- Acceso manual al repositorio oficial y sus actualizaciones desde “Acerca de”.
 - Detección de impresoras instaladas.
 - Impresión individual e incremental.
 - Impresión genérica mediante el controlador instalado en Windows.
@@ -17,6 +19,8 @@ Aplicación de escritorio para diseñar e imprimir etiquetas
   personalizado solicitado por Astolfo.
 - Diagnóstico previo de tamaño solicitado y aplicado, DPI, orientación, área
   imprimible y escalado.
+- Cantidad configurable tanto en impresión normal como incremental.
+- Impresión limpia que excluye el marco y las selecciones visibles del editor.
 - Pegado automático de campos `Nombre:` y `PosCode:` desde el portapapeles.
 - Asociación de archivos `.astolfo` mediante el instalador.
 
@@ -55,9 +59,14 @@ solicitadas, las aceptadas por el controlador, el DPI, la orientación, el área
 imprimible y el escalado aplicado.
 
 El modo **Usar tamaño configurado en la impresora** es el predeterminado y suele
-ser el más compatible. El modo **Solicitar tamaño desde Astolfo** intenta aplicar
-las dimensiones del diseño y avisa si el controlador conserva otro tamaño. El
-DPI puede dejarse a cargo del controlador o elegirse manualmente.
+ser el más compatible. Desde **Ajustes → Impresión avanzada** se puede elegir el
+modo **Solicitar tamaño desde Astolfo** y configurar el DPI automático o manual.
+Los controles ignoran la rueda del ratón y su selección se conserva entre
+sesiones.
+
+El menú **Ajustes** permite desactivar la impresión limpia o volver a mostrar los
+datos técnicos completos en la confirmación. La impresión limpia está activada
+de forma predeterminada y las preferencias se conservan entre sesiones.
 
 ## Crear el ejecutable
 
