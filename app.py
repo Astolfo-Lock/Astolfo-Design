@@ -58,13 +58,20 @@ from PyQt6.QtWidgets import (
 
 
 APP_NAME = "Astolfo Design"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 PROJECT_URL = "https://github.com/Astolfo-Lock/Astolfo-Design"
 FILE_FILTER = "Diseño Astolfo (*.astolfo);;Diseño antiguo (*.astolfo.json);;Archivo JSON (*.json)"
 PRINT_MODE_DRIVER = "driver"
 PRINT_MODE_ASTOLFO = "astolfo"
 
 RELEASE_NOTES = (
+    (
+        "1.4.1",
+        "Correcciones",
+        (
+            "Corrección del rastro visual de los puntos de redimensión al mover elementos.",
+        ),
+    ),
     (
         "1.4.0",
         "Funciones nuevas",
@@ -249,6 +256,7 @@ class LabelCanvas(QGraphicsView):
         self.height_mm = 50.0
         self.design_scene = QGraphicsScene(self)
         self.setScene(self.design_scene)
+        self.design_scene.selectionChanged.connect(self.viewport().update)
         self.setBackgroundBrush(QColor("#dfe3e9"))
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -1001,6 +1009,8 @@ class LabelCanvas(QGraphicsView):
         else:
             self.unsetCursor()
         super().mouseMoveEvent(event)
+        if event.buttons() & Qt.MouseButton.LeftButton and item is not None:
+            self.viewport().update()
 
     def mouseReleaseEvent(self, event):
         was_resizing = self.resize_state is not None
@@ -1016,6 +1026,7 @@ class LabelCanvas(QGraphicsView):
             self.snap_item_to_guides(item)
             self.resolve_collisions(item)
             self.element_moved.emit()
+        self.viewport().update()
 
 
 class MainWindow(QMainWindow):
