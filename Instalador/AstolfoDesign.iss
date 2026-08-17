@@ -1,5 +1,5 @@
 #define MyAppName "Astolfo Design"
-#define MyAppVersion "1.4.0"
+#define MyAppVersion "1.4.1"
 #define MyAppPublisher "Astolfo Design"
 #define MyAppExeName "AstolfoDesign.exe"
 

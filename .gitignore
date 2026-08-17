@@ -15,6 +15,7 @@ dist_*/
 Instalador/App/
 Instalador/Salida/
 Instalador/Compatibilidad/
+Instalador/AmbosInstaladores/
 Instalador/*.zip
 Instalador/*.rar
 *.exe
