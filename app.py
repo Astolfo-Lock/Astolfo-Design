@@ -9,14 +9,17 @@ import zint
 from PyQt6.QtCore import QMarginsF, QRectF, QSettings, QSize, QSizeF, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
+    QBrush,
     QColor,
     QDesktopServices,
     QFont,
+    QFontMetricsF,
     QIcon,
     QKeySequence,
     QPainter,
     QPen,
     QPixmap,
+    QTransform,
 )
 from PyQt6.QtGui import QPageLayout, QPageSize
 from PyQt6.QtPrintSupport import QPrinter, QPrinterInfo
@@ -38,6 +41,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMenu,
@@ -54,13 +58,23 @@ from PyQt6.QtWidgets import (
 
 
 APP_NAME = "Astolfo Design"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 PROJECT_URL = "https://github.com/Astolfo-Lock/Astolfo-Design"
 FILE_FILTER = "Diseño Astolfo (*.astolfo);;Diseño antiguo (*.astolfo.json);;Archivo JSON (*.json)"
 PRINT_MODE_DRIVER = "driver"
 PRINT_MODE_ASTOLFO = "astolfo"
 
 RELEASE_NOTES = (
+    (
+        "1.4.0",
+        "Funciones nuevas",
+        (
+            "Ajuste automático de Nombre y PosCode dentro de la etiqueta.",
+            "Opción en Ajustes para evitar superposición entre elementos.",
+            "Edición de textos con selección protegida antes de los dos puntos.",
+            "Puntos visuales para estirar y aplastar elementos desde el marco.",
+        ),
+    ),
     (
         "1.3.0",
         "Funciones nuevas",
@@ -242,6 +256,8 @@ class LabelCanvas(QGraphicsView):
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.copied_element = None
+        self.collision_avoidance_enabled = False
+        self.resize_state = None
 
         self.label_item = QGraphicsRectItem()
         self.label_item.setBrush(QColor("white"))
@@ -284,6 +300,138 @@ class LabelCanvas(QGraphicsView):
             and item.data(0) in ("text", "image", "barcode")
         ]
 
+    def set_collision_avoidance_enabled(self, enabled):
+        self.collision_avoidance_enabled = bool(enabled)
+
+    def auto_wrap_field_text(self, item):
+        if item.data(0) != "text":
+            return
+        text = item.toPlainText().strip()
+        match = re.match(
+            r"^(nombre|pos\s*code)\s*:\s*(.*)$",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if not match:
+            return
+
+        field_key = re.sub(r"\s+", "", match.group(1)).lower()
+        field = "PosCode" if field_key == "poscode" else "Nombre"
+        value = " ".join(match.group(2).split())
+        if not value:
+            item.setPlainText(f"{field}:")
+            item.setData(1, item.toPlainText())
+            return
+
+        available_scene_width = max(2.0, self.width_mm - item.pos().x() - 1.0)
+        available_width = available_scene_width / max(
+            abs(item.transform().m11()), 0.01
+        )
+        font_metrics = QFontMetricsF(item.font())
+        first_prefix = f"{field}: "
+        full_text = first_prefix + value
+        if font_metrics.horizontalAdvance(full_text) <= available_width:
+            item.setPlainText(full_text)
+            item.setData(1, full_text)
+            return
+
+        space_width = max(font_metrics.horizontalAdvance(" "), 1.0)
+        indent = " " * max(
+            1, round(font_metrics.horizontalAdvance(first_prefix) / space_width)
+        )
+        lines = []
+        current = first_prefix
+
+        def append_long_token(line, token):
+            for character in token:
+                candidate = line + character
+                if (
+                    font_metrics.horizontalAdvance(candidate) <= available_width
+                    or line in (first_prefix, indent)
+                ):
+                    line = candidate
+                    continue
+                lines.append(line.rstrip())
+                line = indent + character
+            return line
+
+        for word in value.split():
+            separator = "" if current in (first_prefix, indent) else " "
+            candidate = current + separator + word
+            if font_metrics.horizontalAdvance(candidate) <= available_width:
+                current = candidate
+                continue
+            if current not in (first_prefix, indent):
+                lines.append(current.rstrip())
+                current = indent
+            current = append_long_token(current, word)
+        lines.append(current.rstrip())
+        wrapped = "\n".join(lines)
+        item.setPlainText(wrapped)
+        item.setData(1, wrapped)
+
+    def resolve_collisions(self, item):
+        if not self.collision_avoidance_enabled or item is None:
+            return False
+        label_rect = self.label_item.rect()
+
+        def clamp_item(target):
+            rect = target.sceneBoundingRect()
+            x = target.pos().x()
+            y = target.pos().y()
+            if rect.width() <= label_rect.width():
+                if rect.left() < label_rect.left():
+                    x += label_rect.left() - rect.left()
+                    rect.translate(label_rect.left() - rect.left(), 0)
+                if rect.right() > label_rect.right():
+                    x -= rect.right() - label_rect.right()
+                    rect.translate(-(rect.right() - label_rect.right()), 0)
+            else:
+                x += label_rect.center().x() - rect.center().x()
+                rect.translate(label_rect.center().x() - rect.center().x(), 0)
+
+            if rect.height() <= label_rect.height():
+                if rect.top() < label_rect.top():
+                    y += label_rect.top() - rect.top()
+                    rect.translate(0, label_rect.top() - rect.top())
+                if rect.bottom() > label_rect.bottom():
+                    y -= rect.bottom() - label_rect.bottom()
+            else:
+                y += label_rect.center().y() - rect.center().y()
+            moved = x != target.pos().x() or y != target.pos().y()
+            if moved:
+                target.setPos(x, y)
+            return moved
+
+        changed = clamp_item(item)
+        active_rect = item.sceneBoundingRect()
+        gap = 0.4
+        for other in self.design_items():
+            if other is item:
+                continue
+            other_rect = other.sceneBoundingRect()
+            intersection = active_rect.intersected(other_rect)
+            if intersection.width() <= 0.01 or intersection.height() <= 0.01:
+                continue
+
+            dx = 0.0
+            dy = 0.0
+            if intersection.width() <= intersection.height():
+                if other_rect.center().x() >= active_rect.center().x():
+                    dx = intersection.width() + gap
+                else:
+                    dx = -(intersection.width() + gap)
+            else:
+                if other_rect.center().y() >= active_rect.center().y():
+                    dy = intersection.height() + gap
+                else:
+                    dy = -(intersection.height() + gap)
+
+            other.moveBy(dx, dy)
+            clamp_item(other)
+            changed = True
+        return changed
+
     @staticmethod
     def make_movable(item):
         item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
@@ -291,14 +439,34 @@ class LabelCanvas(QGraphicsView):
         item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
 
     @staticmethod
-    def set_item_scale(item, logical_scale, base_scale=1.0):
-        item.setData(2, float(logical_scale))
+    def set_item_scale(item, logical_scale, base_scale=1.0, logical_scale_y=None):
+        logical_scale = float(logical_scale)
+        logical_scale_y = (
+            logical_scale if logical_scale_y is None else float(logical_scale_y)
+        )
+        item.setData(2, logical_scale)
         item.setData(3, float(base_scale))
-        item.setScale(float(logical_scale) * float(base_scale))
+        item.setData(5, logical_scale_y)
+        transform = QTransform()
+        transform.scale(
+            logical_scale * float(base_scale),
+            logical_scale_y * float(base_scale),
+        )
+        item.setTransform(transform)
 
     @staticmethod
     def logical_scale(item):
         value = item.data(2)
+        return float(value) if value is not None else 1.0
+
+    @staticmethod
+    def logical_scale_y(item):
+        value = item.data(5)
+        return float(value) if value is not None else LabelCanvas.logical_scale(item)
+
+    @staticmethod
+    def base_scale(item):
+        value = item.data(3)
         return float(value) if value is not None else 1.0
 
     def add_text(
@@ -309,6 +477,7 @@ class LabelCanvas(QGraphicsView):
         scale=1.0,
         bold=False,
         italic=False,
+        scale_y=None,
     ):
         item = QGraphicsTextItem(value)
         item.setData(0, "text")
@@ -320,7 +489,7 @@ class LabelCanvas(QGraphicsView):
         font.setItalic(italic)
         item.setFont(font)
         self.make_movable(item)
-        self.set_item_scale(item, scale)
+        self.set_item_scale(item, scale, logical_scale_y=scale_y)
         self.design_scene.addItem(item)
         item.setPos(
             x_ratio * self.width_mm,
@@ -328,7 +497,7 @@ class LabelCanvas(QGraphicsView):
         )
         return item
 
-    def add_image(self, path, x_ratio=0.1, y_ratio=0.3, scale=1.0):
+    def add_image(self, path, x_ratio=0.1, y_ratio=0.3, scale=1.0, scale_y=None):
         pixmap = QPixmap(path)
         if pixmap.isNull():
             raise ValueError("La imagen seleccionada no se puede leer.")
@@ -340,7 +509,7 @@ class LabelCanvas(QGraphicsView):
         item.setData(0, "image")
         item.setData(1, os.path.abspath(path))
         self.make_movable(item)
-        self.set_item_scale(item, scale, base_scale)
+        self.set_item_scale(item, scale, base_scale, scale_y)
         self.design_scene.addItem(item)
         item.setPos(
             x_ratio * self.width_mm,
@@ -348,7 +517,7 @@ class LabelCanvas(QGraphicsView):
         )
         return item
 
-    def add_barcode(self, value, x_ratio=0.1, y_ratio=0.55, scale=1.0):
+    def add_barcode(self, value, x_ratio=0.1, y_ratio=0.55, scale=1.0, scale_y=None):
         if not value.strip():
             raise ValueError("El contenido del código de barras no puede estar vacío.")
         item = ZintBarcodeItem(value.strip())
@@ -360,7 +529,7 @@ class LabelCanvas(QGraphicsView):
         item.setData(1, value.strip())
         item.setData(4, bounds.width() * base_scale > self.width_mm * 0.9)
         self.make_movable(item)
-        self.set_item_scale(item, scale, base_scale)
+        self.set_item_scale(item, scale, base_scale, scale_y)
         self.design_scene.addItem(item)
         item.setPos(
             x_ratio * self.width_mm,
@@ -383,6 +552,9 @@ class LabelCanvas(QGraphicsView):
                 "y": round(item.pos().y() / height_mm, 6),
                 "scale": round(self.logical_scale(item), 3),
             }
+            scale_y = self.logical_scale_y(item)
+            if abs(scale_y - self.logical_scale(item)) > 0.001:
+                element["scale_y"] = round(scale_y, 3)
             if item.data(0) == "text":
                 element["value"] = item.toPlainText()
                 element["bold"] = item.font().bold()
@@ -401,6 +573,7 @@ class LabelCanvas(QGraphicsView):
             "x": item.pos().x() / self.width_mm,
             "y": item.pos().y() / self.height_mm,
             "scale": self.logical_scale(item),
+            "scale_y": self.logical_scale_y(item),
         }
         if item.data(0) == "text":
             element.update(
@@ -420,6 +593,7 @@ class LabelCanvas(QGraphicsView):
         x = min(0.95, max(0.0, float(element.get("x", 0.1)) + offset))
         y = min(0.95, max(0.0, float(element.get("y", 0.1)) + offset))
         scale = float(element.get("scale", 1.0))
+        scale_y = float(element.get("scale_y", scale))
         if element["type"] == "text":
             return self.add_text(
                 element.get("value", ""),
@@ -428,12 +602,208 @@ class LabelCanvas(QGraphicsView):
                 scale,
                 bool(element.get("bold", False)),
                 bool(element.get("italic", False)),
+                scale_y,
             )
         if element["type"] == "image":
-            return self.add_image(element["path"], x, y, scale)
+            return self.add_image(element["path"], x, y, scale, scale_y)
         if element["type"] == "barcode":
-            return self.add_barcode(element.get("value", ""), x, y, scale)
+            return self.add_barcode(element.get("value", ""), x, y, scale, scale_y)
         raise ValueError("Tipo de elemento desconocido.")
+
+    def handle_at(self, item, scene_pos):
+        rect = item.sceneBoundingRect()
+        view_margin = 8
+        scene_left = self.mapToScene(0, 0)
+        scene_right = self.mapToScene(view_margin, 0)
+        margin = max(0.6, abs(scene_right.x() - scene_left.x()))
+
+        for handle, x, y in self.resize_handle_points(item):
+            handle_rect = QRectF(
+                x - margin,
+                y - margin,
+                margin * 2,
+                margin * 2,
+            )
+            if handle_rect.contains(scene_pos):
+                return handle
+
+        edge_margin = margin * 0.65
+        if rect.adjusted(-edge_margin, -edge_margin, edge_margin, edge_margin).contains(
+            scene_pos
+        ):
+            horizontal = None
+            vertical = None
+            if abs(scene_pos.x() - rect.left()) <= edge_margin:
+                horizontal = "left"
+            elif abs(scene_pos.x() - rect.right()) <= edge_margin:
+                horizontal = "right"
+            if abs(scene_pos.y() - rect.top()) <= edge_margin:
+                vertical = "top"
+            elif abs(scene_pos.y() - rect.bottom()) <= edge_margin:
+                vertical = "bottom"
+            if horizontal or vertical:
+                return horizontal, vertical
+        return None
+
+    def resize_handle_points(self, item):
+        rect = item.sceneBoundingRect()
+        center_x = rect.center().x()
+        center_y = rect.center().y()
+        return (
+            (("left", "top"), rect.left(), rect.top()),
+            ((None, "top"), center_x, rect.top()),
+            (("right", "top"), rect.right(), rect.top()),
+            (("right", None), rect.right(), center_y),
+            (("right", "bottom"), rect.right(), rect.bottom()),
+            ((None, "bottom"), center_x, rect.bottom()),
+            (("left", "bottom"), rect.left(), rect.bottom()),
+            (("left", None), rect.left(), center_y),
+        )
+
+    def drawForeground(self, painter, rect):
+        super().drawForeground(painter, rect)
+        item = self.selected_design_item()
+        if item is None:
+            return
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        scene_left = self.mapToScene(0, 0)
+        scene_right = self.mapToScene(9, 0)
+        handle_size = max(0.7, abs(scene_right.x() - scene_left.x()))
+        radius = handle_size / 2
+
+        selected_rect = item.sceneBoundingRect()
+        painter.setPen(QPen(QColor("#2f6fed"), max(handle_size * 0.16, 0.08)))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(selected_rect)
+
+        painter.setPen(QPen(QColor("white"), max(handle_size * 0.18, 0.08)))
+        painter.setBrush(QBrush(QColor("#2f6fed")))
+        for _handle, x, y in self.resize_handle_points(item):
+            painter.drawEllipse(QRectF(x - radius, y - radius, handle_size, handle_size))
+        painter.restore()
+
+    @staticmethod
+    def cursor_for_handle(handle):
+        horizontal, vertical = handle
+        if horizontal and vertical:
+            if (horizontal, vertical) in (("left", "top"), ("right", "bottom")):
+                return Qt.CursorShape.SizeFDiagCursor
+            return Qt.CursorShape.SizeBDiagCursor
+        if horizontal:
+            return Qt.CursorShape.SizeHorCursor
+        return Qt.CursorShape.SizeVerCursor
+
+    def begin_manual_resize(self, item, handle, scene_pos):
+        rect = item.sceneBoundingRect()
+        local_rect = item.boundingRect()
+        self.resize_state = {
+            "item": item,
+            "handle": handle,
+            "start_pos": item.pos(),
+            "start_rect": rect,
+            "local_rect": local_rect,
+            "start_scale_x": self.logical_scale(item),
+            "start_scale_y": self.logical_scale_y(item),
+            "base_scale": self.base_scale(item),
+            "press": scene_pos,
+        }
+
+    def update_manual_resize(self, scene_pos):
+        if not self.resize_state:
+            return
+        state = self.resize_state
+        item = state["item"]
+        horizontal, vertical = state["handle"]
+        start_rect = state["start_rect"]
+        local_rect = state["local_rect"]
+        base_scale = max(state["base_scale"], 0.0001)
+        min_scene_size = 1.0
+
+        total_scale_x = state["start_scale_x"] * base_scale
+        total_scale_y = state["start_scale_y"] * base_scale
+        left = start_rect.left()
+        right = start_rect.right()
+        top = start_rect.top()
+        bottom = start_rect.bottom()
+
+        if horizontal == "left":
+            left = min(scene_pos.x(), right - min_scene_size)
+        elif horizontal == "right":
+            right = max(scene_pos.x(), left + min_scene_size)
+        if vertical == "top":
+            top = min(scene_pos.y(), bottom - min_scene_size)
+        elif vertical == "bottom":
+            bottom = max(scene_pos.y(), top + min_scene_size)
+
+        if horizontal:
+            total_scale_x = (right - left) / max(local_rect.width(), 0.0001)
+        if vertical:
+            total_scale_y = (bottom - top) / max(local_rect.height(), 0.0001)
+
+        logical_x = max(0.05, total_scale_x / base_scale)
+        logical_y = max(0.05, total_scale_y / base_scale)
+        self.set_item_scale(item, logical_x, base_scale, logical_y)
+        item.setPos(
+            left - local_rect.left() * total_scale_x,
+            top - local_rect.top() * total_scale_y,
+        )
+        self.viewport().update()
+
+    def selected_design_item(self):
+        selected = self.design_scene.selectedItems()
+        if not selected:
+            return None
+        item = selected[0]
+        return item if item.data(0) in ("text", "image", "barcode") else None
+
+    def snap_item_to_guides(self, item):
+        if not self.collision_avoidance_enabled or item is None:
+            return False
+        view_left = self.mapToScene(0, 0)
+        view_right = self.mapToScene(7, 0)
+        threshold = max(0.5, abs(view_right.x() - view_left.x()))
+        rect = item.sceneBoundingRect()
+
+        other_rects = [
+            other.sceneBoundingRect()
+            for other in self.design_items()
+            if other is not item
+        ]
+        guide_rects = [self.label_item.rect(), *other_rects]
+
+        x_guides = []
+        y_guides = []
+        for guide in guide_rects:
+            x_guides.extend((guide.left(), guide.center().x(), guide.right()))
+            y_guides.extend((guide.top(), guide.center().y(), guide.bottom()))
+
+        x_points = (rect.left(), rect.center().x(), rect.right())
+        y_points = (rect.top(), rect.center().y(), rect.bottom())
+        best_dx = None
+        best_dy = None
+        for point in x_points:
+            for guide in x_guides:
+                delta = guide - point
+                if abs(delta) <= threshold and (
+                    best_dx is None or abs(delta) < abs(best_dx)
+                ):
+                    best_dx = delta
+        for point in y_points:
+            for guide in y_guides:
+                delta = guide - point
+                if abs(delta) <= threshold and (
+                    best_dy is None or abs(delta) < abs(best_dy)
+                ):
+                    best_dy = delta
+
+        dx = best_dx if best_dx is not None else 0.0
+        dy = best_dy if best_dy is not None else 0.0
+        if dx == 0.0 and dy == 0.0:
+            return False
+        item.moveBy(dx, dy)
+        return True
 
     def contextMenuEvent(self, event):
         item = self.itemAt(event.pos())
@@ -493,27 +863,58 @@ class LabelCanvas(QGraphicsView):
             self.copied_element = self.element_data(item)
         elif chosen == paste_action and self.copied_element is not None:
             pasted = self.create_from_data(self.copied_element, 0.03)
+            if pasted.data(0) == "text":
+                self.auto_wrap_field_text(pasted)
+            self.resolve_collisions(pasted)
             self.design_scene.clearSelection()
             pasted.setSelected(True)
         elif chosen == duplicate_action and item is not None:
             duplicated = self.create_from_data(self.element_data(item), 0.03)
+            if duplicated.data(0) == "text":
+                self.auto_wrap_field_text(duplicated)
+            self.resolve_collisions(duplicated)
             self.design_scene.clearSelection()
             duplicated.setSelected(True)
         elif chosen == delete_action and item is not None:
             self.design_scene.removeItem(item)
         self.viewport().update()
 
+    def get_editable_text(self, title, prompt, current_text):
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.setLabelText(prompt)
+        dialog.setInputMode(QInputDialog.InputMode.TextInput)
+        dialog.setTextValue(current_text)
+
+        def select_value_only():
+            field = dialog.findChild(QLineEdit)
+            if field is None:
+                return
+            colon_index = current_text.find(":")
+            if colon_index < 0:
+                field.selectAll()
+                return
+            start = colon_index + 1
+            while start < len(current_text) and current_text[start].isspace():
+                start += 1
+            field.setSelection(start, max(0, len(current_text) - start))
+
+        QTimer.singleShot(0, select_value_only)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        return dialog.textValue(), accepted
+
     def edit_text_item(self, item):
         current_text = item.toPlainText()
-        value, accepted = QInputDialog.getText(
-            self,
+        value, accepted = self.get_editable_text(
             "Editar texto",
             "Modifica el contenido del texto:",
-            text=current_text,
+            current_text,
         )
         if accepted and value.strip():
             item.setPlainText(value.strip())
             item.setData(1, value.strip())
+            self.auto_wrap_field_text(item)
+            self.resolve_collisions(item)
             self.viewport().update()
 
     def edit_barcode_item(self, item):
@@ -531,10 +932,11 @@ class LabelCanvas(QGraphicsView):
         x_ratio = item.pos().x() / max(self.width_mm, 1)
         y_ratio = item.pos().y() / max(self.height_mm, 1)
         logical_scale = self.logical_scale(item)
+        logical_scale_y = self.logical_scale_y(item)
         z_value = item.zValue()
         try:
             replacement = self.add_barcode(
-                value, x_ratio, y_ratio, logical_scale
+                value, x_ratio, y_ratio, logical_scale, logical_scale_y
             )
         except (ValueError, RuntimeError) as error:
             QMessageBox.critical(
@@ -569,9 +971,50 @@ class LabelCanvas(QGraphicsView):
             return
         super().mouseDoubleClickEvent(event)
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            item = self.selected_design_item()
+            if item is not None:
+                scene_pos = self.mapToScene(event.position().toPoint())
+                handle = self.handle_at(item, scene_pos)
+                if handle is not None:
+                    self.begin_manual_resize(item, handle, scene_pos)
+                    self.setCursor(self.cursor_for_handle(handle))
+                    event.accept()
+                    return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        scene_pos = self.mapToScene(event.position().toPoint())
+        if self.resize_state:
+            self.update_manual_resize(scene_pos)
+            event.accept()
+            return
+
+        item = self.selected_design_item()
+        if item is not None:
+            handle = self.handle_at(item, scene_pos)
+            if handle is not None:
+                self.setCursor(self.cursor_for_handle(handle))
+            else:
+                self.unsetCursor()
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(event)
+
     def mouseReleaseEvent(self, event):
-        super().mouseReleaseEvent(event)
-        if self.design_scene.selectedItems():
+        was_resizing = self.resize_state is not None
+        if was_resizing:
+            self.resize_state = None
+            self.unsetCursor()
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+        selected = self.design_scene.selectedItems()
+        if selected:
+            item = selected[0]
+            self.snap_item_to_guides(item)
+            self.resolve_collisions(item)
             self.element_moved.emit()
 
 
@@ -595,6 +1038,9 @@ class MainWindow(QMainWindow):
             self.paper_mode_value = PRINT_MODE_DRIVER
         saved_dpi = self.app_settings.value("print/dpi", "auto", type=str)
         self.dpi_value = int(saved_dpi) if saved_dpi in ("203", "300", "600") else None
+        self.show_size_controls = self.app_settings.value(
+            "editor/show_size_controls", False, type=bool
+        )
         self.setWindowTitle(f"{APP_NAME} — Sin título")
         self.setWindowIcon(QIcon(resource_path("Logo.ico")))
         self.resize(1180, 760)
@@ -602,6 +1048,9 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(LIGHT_STYLESHEET)
 
         self.canvas = LabelCanvas()
+        self.canvas.set_collision_avoidance_enabled(
+            self.app_settings.value("editor/avoid_collisions", False, type=bool)
+        )
         self.canvas.element_moved.connect(
             lambda: self.statusBar().showMessage("Elemento movido", 2500)
         )
@@ -716,7 +1165,24 @@ class MainWindow(QMainWindow):
         self.print_details_action.toggled.connect(
             lambda checked: self.app_settings.setValue("print/show_details", checked)
         )
+        self.avoid_collisions_action = QAction(
+            "Evitar superposición de elementos", self
+        )
+        self.avoid_collisions_action.setCheckable(True)
+        self.avoid_collisions_action.setChecked(
+            self.app_settings.value("editor/avoid_collisions", False, type=bool)
+        )
+        self.avoid_collisions_action.toggled.connect(self.set_collision_avoidance)
+        self.show_size_controls_action = QAction(
+            "Mostrar control clásico de tamaño", self
+        )
+        self.show_size_controls_action.setCheckable(True)
+        self.show_size_controls_action.setChecked(self.show_size_controls)
+        self.show_size_controls_action.toggled.connect(self.set_size_controls_visible)
         settings_menu = QMenu(self)
+        settings_menu.addAction(self.avoid_collisions_action)
+        settings_menu.addAction(self.show_size_controls_action)
+        settings_menu.addSeparator()
         settings_menu.addAction(self.clean_print_action)
         settings_menu.addAction(self.print_details_action)
         settings_menu.addSeparator()
@@ -735,6 +1201,28 @@ class MainWindow(QMainWindow):
         )
         layout.addStretch()
         return toolbar
+
+    def set_collision_avoidance(self, enabled):
+        self.canvas.set_collision_avoidance_enabled(enabled)
+        self.app_settings.setValue("editor/avoid_collisions", enabled)
+        self.statusBar().showMessage(
+            "Evitar superposición activada"
+            if enabled
+            else "Evitar superposición desactivada",
+            2500,
+        )
+
+    def set_size_controls_visible(self, enabled):
+        self.show_size_controls = bool(enabled)
+        self.app_settings.setValue("editor/show_size_controls", self.show_size_controls)
+        if hasattr(self, "size_section"):
+            self.size_section.setVisible(self.show_size_controls)
+        self.statusBar().showMessage(
+            "Control clásico de tamaño visible"
+            if enabled
+            else "Control clásico de tamaño oculto",
+            2500,
+        )
 
     def show_about(self):
         notes_html = []
@@ -901,10 +1389,16 @@ class MainWindow(QMainWindow):
         hint.setMinimumHeight(44)
         layout.addWidget(hint)
 
-        layout.addSpacing(12)
-        layout.addWidget(self.section_title("Tamaño del elemento"))
-        layout.addWidget(self.size_display)
-        layout.addWidget(self.size_slider)
+        self.size_section = QFrame()
+        self.size_section.setObjectName("sizeSection")
+        size_layout = QVBoxLayout(self.size_section)
+        size_layout.setContentsMargins(0, 12, 0, 0)
+        size_layout.setSpacing(10)
+        size_layout.addWidget(self.section_title("Tamaño del elemento"))
+        size_layout.addWidget(self.size_display)
+        size_layout.addWidget(self.size_slider)
+        self.size_section.setVisible(self.show_size_controls)
+        layout.addWidget(self.size_section)
 
         layout.addSpacing(10)
         printer_heading = QHBoxLayout()
@@ -1023,6 +1517,9 @@ class MainWindow(QMainWindow):
         width = self.width_input.value()
         height = self.height_input.value()
         self.canvas.set_dimensions_mm(width * 10, height * 10)
+        for item in self.canvas.design_items():
+            self.canvas.auto_wrap_field_text(item)
+            self.canvas.resolve_collisions(item)
         self.dimension_display.setText(f"{width:g} × {height:g} cm")
         self.statusBar().showMessage(
             f"Etiqueta actualizada: {width:g} × {height:g} cm", 3000
@@ -1048,7 +1545,9 @@ class MainWindow(QMainWindow):
             self, "Insertar texto", "Escribe el texto de la etiqueta:"
         )
         if accepted and value.strip():
-            self.canvas.add_text(value.strip())
+            item = self.canvas.add_text(value.strip())
+            self.canvas.auto_wrap_field_text(item)
+            self.canvas.resolve_collisions(item)
             self.statusBar().showMessage(
                 "Texto insertado. Puedes arrastrarlo para moverlo.", 3500
             )
@@ -1063,7 +1562,8 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            self.canvas.add_image(path)
+            item = self.canvas.add_image(path)
+            self.canvas.resolve_collisions(item)
             self.statusBar().showMessage(
                 "Imagen insertada. Puedes arrastrarla para moverla.", 3500
             )
@@ -1080,6 +1580,7 @@ class MainWindow(QMainWindow):
             return
         try:
             item = self.canvas.add_barcode(value)
+            self.canvas.resolve_collisions(item)
             item.setSelected(True)
             self.statusBar().showMessage(
                 f"Código de barras Code 128 generado: {value.strip()}", 4000
@@ -1158,6 +1659,8 @@ class MainWindow(QMainWindow):
                 if match:
                     item.setPlainText(match.group(1) + value)
                     item.setData(1, item.toPlainText())
+                    self.canvas.auto_wrap_field_text(item)
+                    self.canvas.resolve_collisions(item)
                     updated.append(field)
                     break
 
@@ -1230,6 +1733,8 @@ class MainWindow(QMainWindow):
         item = selected[0]
         base_scale = float(item.data(3)) if item.data(3) is not None else 1.0
         self.canvas.set_item_scale(item, percentage / 100, base_scale)
+        self.canvas.auto_wrap_field_text(item)
+        self.canvas.resolve_collisions(item)
         element_name = self.element_name(selected[0])
         self.size_display.setText(f"{element_name}: {percentage}%")
         self.statusBar().showMessage(
@@ -1616,21 +2121,25 @@ class MainWindow(QMainWindow):
             self.apply_dimensions()
             warnings = []
             for element in data.get("elements", []):
+                scale = float(element.get("scale", 1.0))
+                scale_y = float(element.get("scale_y", scale))
                 if element.get("type") == "text":
                     self.canvas.add_text(
                         element.get("value", ""),
                         float(element.get("x", 0.1)),
                         float(element.get("y", 0.1)),
-                        float(element.get("scale", 1.0)),
+                        scale,
                         bool(element.get("bold", False)),
                         bool(element.get("italic", False)),
+                        scale_y,
                     )
                 elif element.get("type") == "barcode":
                     self.canvas.add_barcode(
                         element.get("value", ""),
                         float(element.get("x", 0.1)),
                         float(element.get("y", 0.55)),
-                        float(element.get("scale", 1.0)),
+                        scale,
+                        scale_y,
                     )
                 elif element.get("type") == "image":
                     try:
@@ -1638,7 +2147,8 @@ class MainWindow(QMainWindow):
                             element["path"],
                             float(element.get("x", 0.1)),
                             float(element.get("y", 0.3)),
-                            float(element.get("scale", 1.0)),
+                            scale,
+                            scale_y,
                         )
                     except (KeyError, ValueError):
                         warnings.append(element.get("path", "imagen desconocida"))
